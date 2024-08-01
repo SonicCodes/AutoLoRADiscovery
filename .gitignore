@@ -1,0 +1,10 @@
+*.pt
+*.png
+*.jpg
+*.pth
+*.pyc
+*.jpeg
+*.wav
+*.safetensors
+junk/*
+wandb/*
