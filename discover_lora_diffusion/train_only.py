@@ -8,11 +8,10 @@ from accelerate.logging import get_logger
 from tqdm.auto import tqdm
 import random
 import sys
-import matplotlib.pyplot as plt
 sys.path.append('/home/ubuntu/AutoLoRADiscovery')
-import wandb
 
-from common.render import render_from_lora
+
+from common.render import render_from_lora, render_from_lora_weights
 from common.train_utils import (
     init_train_basics,
     unwrap_model,
@@ -22,12 +21,11 @@ from common.train_utils import (
 )
 
 from types import SimpleNamespace
-from discover_lora_diffusion.models import LoraDiffusion, LoraLinear
+from discover_lora_diffusion.models import LoraDiffusion
 from torch.utils.data import Dataset
 import random
 import diffusers
 import numpy as np
-import seaborn as sns
 
 run_prop= "clpface_newdataset22_small_50step_denoise_reluflat"
 
@@ -45,80 +43,19 @@ class LoraDataset(Dataset):
         return len(self.ldd)
 
     def __getitem__(self, index):
-        (file, (z, face_embedding, _, idx)) = self.ldd[index]
+        (file, (z, face_embedding, properties, idx)) = self.ldd[index]
         # split the mean_logvar
         # mean, logvar = mean_logvar.chunk(2, dim=-1)
         # std = torch.exp(0.5 * logvar)
         # eps = torch.randn_like(std)
         # z = mean + eps * std
-        return torch.Tensor(self.lora_bundle[idx].copy()), face_embedding.flatten().float(), face_embedding.flatten().float(), file
+        return torch.Tensor(self.lora_bundle[idx]), face_embedding[0].flatten().float(), face_embedding[1].flatten().float(), file, torch.Tensor((properties[:-1]))
 
 
 device = "cuda"
 def collate_fn(examples):
-    lora_bundles, clip_embeds, face_embeddings, files = zip(*examples)
-    return torch.stack(lora_bundles), torch.stack(clip_embeds), torch.stack(face_embeddings), files
-
-def plot_attention_weights(attn_weights, max_batches=None, max_heads=None):
-    """
-    Plot attention weights from a multi-head attention mechanism.
-    
-    Parameters:
-    - attn_weights (torch.Tensor): Attention weights tensor of shape [B, H, S, S]
-    - max_batches (int, optional): Maximum number of batches to plot. If None, plot all batches.
-    - max_heads (int, optional): Maximum number of heads to plot. If None, plot all heads.
-    
-    Returns:
-    - None (displays the plot)
-    """
-    
-    # Ensure input is a tensor
-    if not isinstance(attn_weights, torch.Tensor):
-        raise TypeError("Input must be a PyTorch tensor")
-    
-    # Check input shape
-    if len(attn_weights.shape) != 4:
-        raise ValueError("Input tensor must have 4 dimensions [B, H, S, S]")
-    
-    B, H, S, _ = attn_weights.shape
-    
-    # Limit the number of batches and heads if specified
-    B = min(B, max_batches) if max_batches is not None else B
-    H = min(H, max_heads) if max_heads is not None else H
-    
-    # Convert to numpy for plotting
-    attn_weights_np = attn_weights[:B, :H].cpu().detach().numpy()
-    
-    # Create a grid of subplots
-    fig, axs = plt.subplots(B, H, figsize=(4*H, 4*B))
-    
-    # Ensure axs is 2D
-    if B == 1 and H == 1:
-        axs = np.array([[axs]])
-    elif B == 1:
-        axs = axs.reshape(1, -1)
-    elif H == 1:
-        axs = axs.reshape(-1, 1)
-    
-    # Plot each attention head for each batch
-    for b in range(B):
-        for h in range(H):
-            sns.heatmap(attn_weights_np[b, h], ax=axs[b, h], cmap='viridis', cbar=True)
-            axs[b, h].set_title(f'Batch {b+1}, Head {h+1}')
-            axs[b, h].set_xlabel('Key')
-            axs[b, h].set_ylabel('Query')
-            
-            # Remove tick labels to save space
-            axs[b, h].set_xticks([])
-            axs[b, h].set_yticks([])
-    
-    # Add a colorbar to the right of the subplots
-    # fig.colorbar(axs[0, 0].collections[0], ax=axs, location='right', shrink=0.8)
-    
-    # plt.tight_layout()
-    #plt.show()
-
-
+    lora_bundles, clip_embeds, face_embeddings, files, properties = zip(*examples)
+    return torch.stack(lora_bundles), torch.stack(clip_embeds), torch.stack(face_embeddings), files, torch.stack(properties)
 
 def get_dataset(args):
     train_dataset = LoraDataset()
@@ -141,12 +78,12 @@ default_arguments = dict(
     data_dir="/home/ubuntu/AutoLoRADiscovery/loras2.pt",
     output_dir="/mnt/rd/diff_lora_mdl",
     seed=None,
-    train_batch_size=256,
-    max_train_steps=600_000,
+    train_batch_size=128,
+    max_train_steps=100_000,
     # validation_steps=250,
     num_dataloader_repeats=300,
     checkpointing_steps=2000,
-    resume_from_checkpoint=None,#"/home/ubuntu/AutoLoRADiscovery/discover_lora_diffusion/diffusion_lora/checkpoint-clpface_newdataset22_uncond-80000",#"/home/ubuntu/AutoLoRADiscovery/discover_lora_diffusion/diffusion_lora/checkpoint-76000",
+    resume_from_checkpoint=None,#"/mnt/rd/diff_lora_mdl/checkpoint-clpface_newdataset22_small_50step_denoise_reluflat-98000",#"/home/ubuntu/AutoLoRADiscovery/discover_lora_diffusion/diffusion_lora/checkpoint-76000",
     gradient_accumulation_steps=1,
     gradient_checkpointing=False,
     learning_rate=1.0e-4,
@@ -158,7 +95,7 @@ default_arguments = dict(
     use_8bit_adam=False,
     adam_beta1=0.9,
     adam_beta2=0.98,
-    adam_weight_decay=1e-4,
+    adam_weight_decay=1e-3,
     adam_epsilon=1e-08,
     max_grad_norm=1.0,
     report_to="wandb",
@@ -182,7 +119,7 @@ lora_vae = LoraVAE(
     latent_dim=4096,
 ).cuda()
 
-lora_vae.load_state_dict(torch.load("/mnt/rd/model-out-2/checkpoint-45000", map_location="cuda"))
+lora_vae.load_state_dict(torch.load("/mnt/rd/model-out-2/checkpoint-40000", map_location="cuda"))
 
 
 def train(args):
@@ -190,31 +127,30 @@ def train(args):
     args = SimpleNamespace(**args)
     accelerator, weight_dtype = init_train_basics(args, logger)
 
-    lora_diffusion = LoraLinear(
+    lora_diffusion = LoraDiffusion(
         data_dim=4096,
-        model_dim=1024,
-        # ff_mult=3,
-        # chunks=1,
-        # act=torch.nn.SiLU,
-        # num_blocks=4,
-        # layers_per_block=6,
+        model_dim=2048,
+        ff_mult=2,
+        chunks=1,
+        act=torch.nn.SiLU,
+        num_blocks=3,
+        layers_per_block=3,
     )
 
     # scheduler = diffusers.UnCLIPScheduler.from_config("kandinsky-community/kandinsky-2-2-prior", subfolder="scheduler")
     config = {
-    "_class_name": "UnCLIPScheduler",
-    "_diffusers_version": "0.17.0.dev0",
-    "clip_sample": True,
-    "clip_sample_range": 10.0,  # Adjusted to match your data range
-    "num_train_timesteps": 100,  # Reduced from 1000
-    "prediction_type": "epsilon",
-    "variance_type": "fixed_small_log"
+        "_class_name": "UnCLIPScheduler",
+        "_diffusers_version": "0.17.0.dev0",
+        "clip_sample": True,
+        "clip_sample_range": 10.0,  # Adjusted to match your data range
+        "num_train_timesteps": 100,  # Reduced from 1000
+        "prediction_type": "sample",
+        "variance_type": "fixed_small_log"
     }
 
-    scheduler = diffusers.schedulers.scheduling_ddim.DDIMScheduler.from_config(config)
-    #.from_config("kandinsky-community/kandinsky-2-2-prior", subfolder="scheduler")
+    scheduler = diffusers.UnCLIPScheduler.from_config(config)
+    # scheduler.set_timesteps(50)
     # scheduler = diffusers.UnCLIPScheduler.from_config("kandinsky-community/kandinsky-2-2-prior", subfolder="scheduler")
-    # scheduler = diffusers.DDPMScheduler(num_train_timesteps=100, beta_start=0.0004, beta_end=0.999, beta_schedule="linear")
 
     params_to_optimize = list(lora_diffusion.parameters())
     train_dataset, train_dataloader, num_update_steps_per_epoch = get_dataset(args)
@@ -252,10 +188,16 @@ def train(args):
     # ixx = 0
     for epoch in range(first_epoch, args.num_train_epochs):
         lora_diffusion.train()
-        for step, (batch, clip_embs, face_embeddings, files) in enumerate(train_dataloader):
+        for step, (batch, clip_embs, face_embeddings, files, properties) in enumerate(train_dataloader):
             with accelerator.accumulate(lora_diffusion):
-                batch = batch.to(accelerator.device) #/ 6.5 #* 2.0#* (1 / args.lora_std)
-                batch = lora_vae.apply_std_on_weights(batch)
+                batch = batch.to(accelerator.device) #* (1 / args.lora_std)
+                properties = properties.to(accelerator.device)
+                noise = torch.randn((batch.shape[0], 4096)).to(accelerator.device)
+                with torch.no_grad():
+                    batch = lora_vae.encode(lora_vae.apply_std_on_weights(batch), actual_noise=noise)[0]
+                    batch = lora_vae.standardized_z(batch)
+                # print("properties.shape=", (properties).shape)
+                # print("properties.min,max,mean,std", properties.min().item(), properties.max().item(), properties.mean().item(), properties.std().item())
                 # normalize clip embeddings
                 clip_embs = clip_embs.to(accelerator.device)
                 clip_embs = clip_embs / clip_embs.norm(dim=-1, keepdim=True)
@@ -273,12 +215,13 @@ def train(args):
                 # batch = torch.cat([batch, clip_embs], dim=-1)
                 face_embedding = face_embeddings.to(accelerator.device).detach()
 
-                noise = torch.randn_like(batch)
+                
                 timesteps = torch.randint(
                     0, scheduler.config.num_train_timesteps, (batch.shape[0],), device=batch.device
                 ).long()
 
                 noisy_model_input = scheduler.add_noise(batch, noise, timesteps)
+                # prev_noisy_model_input = scheduler.add_noise(batch, noise, torch.relu(timesteps-1))
 
                 # print ("min(noisy_model_input)", noisy_model_input.min().item(), " max(noisy_model_input)", noisy_model_input.max().item(), ' mean(noisy_model_input)', noisy_model_input.mean().item(), " std(noisy_model_input)", noisy_model_input.std().item())
                 # print ("min(batch)", batch.min().item(), " max(batch)", batch.max().item(), ' mean(batch)', batch.mean().item(), " std(batch)", batch.std().item())
@@ -290,33 +233,19 @@ def train(args):
                 # normalize the face_embedding
                 _face_embedding_norm = _face_embedding / _face_embedding.norm(dim=-1, keepdim=True)
                 # if random.random() <= 0.1:
-                #     _face_embedding = torch.zeros_like(_face_embedding)
+                #     properties = torch.zeros_like(properties)
                
 
                 # assert if there are no 
                 # dropped_cond = True
                 # print("face_embedding.shape", _face_embedding.shape)
-                # pred, pred_cond, x_atten_w = lora_diffusion(noisy_model_input, timesteps, _face_embedding_norm)
-                mean_logvar, pred_cond = lora_diffusion(face_embedding)
-                # mean_pred,logvar_pred = mean_logvar.chunk(2, dim=-1)
-                # kld_loss = (-0.5 * torch.sum(1 + logvar_pred - mean_pred.pow(2) - logvar_pred.exp())) #* 0.0
-                # z = mean_pred + torch.randn_like(mean_pred) * torch.exp(0.5 * logvar_pred)
-                # with torch.no_grad():
-                pred = lora_vae.decode(mean_logvar)
-                pred_cond, x_atten_w = pred_cond, None
-
-                split_pred = lora_vae.split(pred)
-                split_batch = lora_vae.split(batch)
-
-                losses = []
-                for spred, sbatch in zip(split_pred, split_batch):
-                    losses.append(F.mse_loss(spred.float(), sbatch.float(), reduction="mean"))
                 
-                losses = torch.stack(losses)
-                local_losses = torch.mean(losses) #* 2
+                pred, pred_cond = lora_diffusion(noisy_model_input, timesteps, properties)
                 
                 # weight_relevance = (std_w2w.log()/10.0).detach()
-                mse_loss = local_losses  #+ (kld_loss * 0.0)
+               
+
+                mse_loss = F.mse_loss(pred, batch, reduction="mean")
                 # lora_mse = F.mse_loss(pred[:, :10_000], batch[:, :10_000], reduction="mean")
                 # cond_mse = F.mse_loss(pred[:, 10_000:], batch[:, 10_000:], reduction="mean")
 
@@ -328,8 +257,8 @@ def train(args):
                 # # raise ValueError("stop here")
 
                 # mse_loss = lora_mse #+ cond_mse
-                pred_cond = pred_cond / pred_cond.norm(dim=-1, keepdim=True)
-                total_clip_loss = F.mse_loss(pred_cond, clip_embs, reduction="mean") * 0.0
+                # pred_cond = pred_cond 
+                total_clip_loss = None#F.mse_loss(pred_cond, properties, reduction="mean") #* 0.0
                 # pred_cond = True
                 # if  is not None:
                 #     pass
@@ -338,8 +267,6 @@ def train(args):
                 #     # total_clip_loss = (mse_embed_loss) #+ cosine_embedding_loss
                 # else:
                 #     total_clip_loss = None
-
-                
                
 
                 loss= mse_loss + (total_clip_loss if ((pred_cond is not None)) else 0.0)
@@ -364,22 +291,14 @@ def train(args):
             
 
             logs = {
-                "mse_loss": mse_loss.detach().item(), 
-                # "kld_loss": kld_loss.detach().item(),
-                
-                "lr": lr_scheduler.get_last_lr()[0], 
+                "mse_loss": mse_loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], 
                 # "cond_recon_loss": total_clip_loss.detach().item() if total_clip_loss is not None else 0.0,
                 "grad_norm": grad_norm.item() if accelerator.sync_gradients else 0.0,
-                "stats": "{:.2f}<>{:.2f} ({:.2f}/{:.2f})".format(batch.min().item(),
-                    batch.max().item(),
-                    batch.mean().item(),
-                    batch.std().item()),
-                "noisy_stats": "{:.2f}<>{:.2f} ({:.2f}/{:.2f})".format(noisy_model_input.min().item(), noisy_model_input.max().item(), noisy_model_input.mean().item(), noisy_model_input.std().item()),
             }
 
             if total_clip_loss is not None:
                 logs["cond_recon_loss"] = total_clip_loss.detach().item()
-            if (global_step) % 1500 == 0:
+            if (global_step - 1) % 500 == 0:
                 lora_diffusion.eval()
                 rend_r, _, (ood_main_comps, ood_cross_comps) = render_from_lora(lora_diffusion, scheduler, lora_vae=lora_vae)
                 rend_b, _, _ = render_from_lora(lora_diffusion, scheduler, batch[0].unsqueeze(0), files[0], lora_vae=lora_vae)
@@ -394,12 +313,6 @@ def train(args):
                 # logs["valid_cond_recon_loss"] = cosine_sim_val.detach().item()
                 lora_diffusion.train()
             progress_bar.set_postfix(**logs)
-            if global_step % 500 == 0:
-                if x_atten_w is not None:
-                    plot_attention_weights(x_atten_w, max_batches=2, max_heads=8)
-                    logs["enc_atten_weights"] = wandb.Image(plt)
-
-                    plt.clf()
             if args.use_wandb:
                 accelerator.log(logs, step=global_step)
 

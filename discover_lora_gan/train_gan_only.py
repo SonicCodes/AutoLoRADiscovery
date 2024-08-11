@@ -22,29 +22,34 @@ from common.train_utils import (
     resume_model
 )
 
+from common.render import render_from_lora, render_from_lora_weights
+
 from types import SimpleNamespace
 from discover_lora_gan.models import Generator, Discriminator
 from torch.utils.data import Dataset
 import random
-
+import numpy as np
 class LoraDataset(Dataset):
-
     def __init__(
         self,
-        lora_bundle_path,
-        num_dataloader_repeats=20, # this could blow up memory be careful!
     ):
-        self.lora_bundle = torch.load(lora_bundle_path)
-        self.lora_bundle = [make_weight_vector(state_dict) for state_dict in self.lora_bundle]
-        self.weight_dict = self.lora_bundle[0][1]
-        self.lora_bundle = [x[0] for x in self.lora_bundle] * num_dataloader_repeats
-        random.shuffle(self.lora_bundle)
+        self.ldd = list(torch.load("/mnt/rd/celeba_vae_map_clip_arc.pt", map_location="cpu").items())
+        self.lora_bundle  = np.memmap("/mnt/rd/all_weights_recon.npy", dtype='float32', mode='r', shape=(64974, 99648))
+
+        random.shuffle(self.ldd)
 
     def __len__(self):
-        return len(self.lora_bundle)
+        return len(self.ldd)
 
     def __getitem__(self, index):
-        return self.lora_bundle[index]
+        (file, (z, face_embedding, _, idx)) = self.ldd[index]
+        # split the mean_logvar
+        # mean, logvar = mean_logvar.chunk(2, dim=-1)
+        # std = torch.exp(0.5 * logvar)
+        # eps = torch.randn_like(std)
+        # z = mean + eps * std
+        return torch.Tensor(self.lora_bundle[idx].copy())#, face_embedding.flatten().float(), face_embedding.flatten().float(), file
+
 
 
 def collate_fn(examples):
@@ -52,7 +57,7 @@ def collate_fn(examples):
 
 
 def get_dataset(args):
-    train_dataset = LoraDataset(args.data_dir)
+    train_dataset = LoraDataset()
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.train_batch_size,
@@ -100,11 +105,20 @@ default_arguments = dict(
     local_rank=-1,
     num_processes=1,
 
-    data_dim = 1_365_504,
+    data_dim = 99_684,
 
     lora_std = 0.0152,
     use_wandb=True
 )
+
+from discover_lora_vae.models import LoraVAE
+# lora_vae = None
+lora_vae = LoraVAE(
+    input_dim=99_648,
+    latent_dim=4096,
+).cuda()
+
+# lora_vae.load_state_dict(torch.load("/mnt/rd/model-out-2/checkpoint-45000", map_location="cuda"))
 
 
 def train(args):
@@ -113,15 +127,15 @@ def train(args):
     accelerator, weight_dtype = init_train_basics(args, logger)
 
     lora_generator = Generator(
-                        data_dim=1_365_504, 
-                        model_dim=256, 
+                        data_dim=99_648, 
+                        model_dim=512, 
                         latent_dim=64, 
                         ff_mult=3, 
                         num_layers=12)
 
     lora_discriminator = Discriminator(
-                        data_dim=1_365_504, 
-                        model_dim=256, 
+                        data_dim=99_648, 
+                        model_dim=512, 
                         ff_mult=3, 
                         num_layers=12, )
 
@@ -129,7 +143,7 @@ def train(args):
     optimizer_g, lr_scheduler_g = get_optimizer(args, list(lora_generator.parameters()), accelerator)
     optimizer_d, lr_scheduler_d = get_optimizer(args, list(lora_discriminator.parameters()), accelerator)
 
-    weight_dict = train_dataset.weight_dict
+    # weight_dict = train_dataset.weight_dict
 
     # Prepare everything with our `accelerator`.
     lora_generator, lora_discriminator, optimizer_g, optimizer_d, train_dataloader, lr_scheduler_g, lr_scheduler_d  = accelerator.prepare(
@@ -151,8 +165,9 @@ def train(args):
         lora_discriminator.train()
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(lora_discriminator):
-                batch = batch.to(accelerator.device) * (1 / args.lora_std)
-                batch = augmentations(batch, weight_dict, slerp=True)
+                batch = batch.to(accelerator.device) #* (1 / args.lora_std)
+                batch = lora_vae.apply_std_on_weights(batch)
+                # batch = augmentations(batch, weight_dict, slerp=True)
 
                 with torch.no_grad():
                     latent = torch.randn(batch.size(0), 64, device=accelerator.device)
@@ -177,6 +192,8 @@ def train(args):
                 optimizer_g.zero_grad(set_to_none=True)
                 lr_scheduler_g.step()
 
+            # if global_step % 500 == 0:
+
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
@@ -190,6 +207,17 @@ def train(args):
                         torch.save(unwrap_model(accelerator, lora_discriminator).state_dict(), save_path)
 
             logs = {"loss_d": loss_d.detach().item(), "lr": lr_scheduler_g.get_last_lr()[0], "loss_g": loss_g.detach().item()}
+            if (global_step - 1) % 1000 == 0:
+                latent = torch.randn(2, 64, device=accelerator.device)
+                pred = lora_generator(latent)
+
+                # lora_diffusion.eval()
+                pred_1 = render_from_lora_weights(lora_vae.deapply_std_on_weights(pred[0].unsqueeze(0)).squeeze(0), "pred_1")
+                pred_2 = render_from_lora_weights(lora_vae.deapply_std_on_weights(pred[1].unsqueeze(0)).squeeze(0), "pred_2")
+
+                logs["test_1"] = pred_1
+                logs["test_2"] = pred_2
+
             progress_bar.set_postfix(**logs)
             if args.use_wandb:
                 accelerator.log(logs, step=global_step) 

@@ -24,8 +24,8 @@ def rtn_face_get(self, img, face):
     return face.embedding
 
 ArcFaceONNX.get = rtn_face_get
-app = FaceAnalysis(name="buffalo_sc", providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-app.prepare(ctx_id=0, det_size=(640, 640))
+app = FaceAnalysis(name="buffalo_l", providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+app.prepare(ctx_id=0, det_size=(320, 320))
 
 def crop_face_box(cv2_img, bbox, face_ratio=1.0):
     h, w, _ = cv2_img.shape

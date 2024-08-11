@@ -27,9 +27,9 @@ class Resnet(nn.Module):
         act = torch.nn.SiLU,
     ):
         super().__init__()
-        self.norm1 = HyperAda(in_dim, ada_dim+cond_dim)
+        self.norm1 = AdaNorm(in_dim, ada_dim)
         self.linear1 = nn.Linear(in_dim, mid_dim)
-        self.norm2 = HyperAda(mid_dim, ada_dim)
+        self.norm2 = AdaNorm(mid_dim, ada_dim)
         self.cond_in = HyperAda(mid_dim, cond_dim)
         self.linear_fm = nn.Linear(mid_dim, mid_dim)
         self.dropout = torch.nn.Dropout(dropout)
@@ -37,7 +37,7 @@ class Resnet(nn.Module):
         self.linear_mlp = nn.Sequential(
             nn.Linear(mid_dim, mid_dim),
             nn.SiLU(),
-            nn.Linear(mid_dim, in_dim),
+            nn.Linear(mid_dim, mid_dim),
         )
         self.act = act()
 
@@ -50,12 +50,12 @@ class Resnet(nn.Module):
     ) -> torch.FloatTensor:
 
         resid = hidden_states
-        emb = torch.cat([ada_emb, face_embed], dim=-1)
-        hidden_states = self.linear1(self.act(self.norm1(hidden_states, emb)))
-        # if face_embed is not None:
-        #     hidden_states = self.linear_fm(self.act(self.cond_in(hidden_states, face_embed))) # this will corrupt the data so much, because it's not trained
+
+        hidden_states = self.linear1(self.act(self.norm1(hidden_states, ada_emb)))
         hidden_states = self.linear_mlp(hidden_states)
-        # hidden_states = self.linear2(hidden_states)
+        if face_embed is not None:
+            hidden_states = self.linear_fm(self.act(self.cond_in(hidden_states, face_embed))) # this will corrupt the data so much, because it's not trained
+        hidden_states = self.linear2(hidden_states)
       
 
         return hidden_states + resid
@@ -324,7 +324,7 @@ class LoraDiffusion(torch.nn.Module):
                       cond_dim=40
                     ):
         super().__init__()
-        cond_dim = model_dim//2
+        # cond_dim = 128
         self.cond_dropout_prob = cond_dropout_prob
         self.time_embed = TimestepEmbedding(model_dim//2, model_dim//2)
         self.cond_dim = cond_dim
@@ -357,25 +357,25 @@ class LoraDiffusion(torch.nn.Module):
         )
 
         self.in_norm = nn.LayerNorm(data_dim)
-        self.in_proj = nn.Linear(data_dim, model_dim)
-        self.out_proj = nn.Linear(model_dim, data_dim)
-        self.out_norm = nn.LayerNorm(model_dim)
+        # self.in_proj = nn.Linear(data_dim, model_dim)
+        # self.out_proj = nn.Linear(model_dim, data_dim)
+        self.out_norm = nn.LayerNorm(model_dim*2)
 
         # self.out_proj.weight.data = self.in_proj.weight.data.T
 
 
-        self.cond_learn = nn.Sequential(
-            nn.Linear(40, cond_dim),
-            # nn.SiLU(),
-            # nn.Tanh()
-        )
+        # self.cond_learn = nn.Sequential(
+        #     nn.Linear(40, cond_dim),
+        #     nn.SiLU(),
+        #     # nn.Tanh()
+        # )
         # self.cond_norm = nn.LayerNorm(cond_dim)
 
-        # self.cond_out_proj = nn.Sequential(
-        #     nn.LayerNorm(model_dim),
-        #     nn.Linear(model_dim, 40),
-        #     nn.Tanh()
-        # )
+        self.cond_out_proj = nn.Sequential(
+            nn.LayerNorm(model_dim*2),
+            nn.Linear(model_dim*2, 40),
+            nn.Tanh()
+        )
 
         self.conditioning = None
 
@@ -426,7 +426,7 @@ class LoraDiffusion(torch.nn.Module):
             # face_emb = F.normalize(face_emb, p=2, dim=-1)
 
             # face_emb = torch.cat([full_emb, face_emb], dim=-1)
-            face_emb = self.cond_learn(face_emb)
+            # face_emb = self.cond_learn(face_emb)
             # face_emb = self.cond_norm(face_emb)
             self.conditioning = face_emb
         else:
@@ -446,8 +446,8 @@ class LoraDiffusion(torch.nn.Module):
         self.get_conditioning(face_embeddings)
         # lora_dim = 10_000
         x = self.in_norm(x)
-        x = self.in_proj(x)
-        # x, x_atten_w = self.encode(x)
+        # x = self.in_proj(x)
+        x, x_atten_w = self.encode(x)
         x_skip = x
         skips = []
         for down in (self.downs):
@@ -465,14 +465,14 @@ class LoraDiffusion(torch.nn.Module):
             # x = torch.cat([x, skip], dim=-1)
             x = up(x, ada_emb,  self.conditioning) + skip
 
-        # x = torch.cat([x, x_skip], dim=-1)
-        x = self.out_norm(x) 
+        
+        x = self.out_norm(torch.cat([x, x_skip], dim=-1)) 
         if face_embeddings is not None:
-            pred_cond = None#self.reconstruct_conditioning(x)
+            pred_cond = self.reconstruct_conditioning(x)
         else:
             pred_cond = None
-        x = self.out_proj(x)
-        # x = self.decode(x)
+        # x = self.out_proj(x)
+        x = self.decode(x)
         
         return x, pred_cond
 

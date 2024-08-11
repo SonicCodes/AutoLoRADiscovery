@@ -27,9 +27,9 @@ class Resnet(nn.Module):
         act = torch.nn.SiLU,
     ):
         super().__init__()
-        self.norm1 = HyperAda(in_dim, ada_dim+cond_dim)
+        self.norm1 = HyperAda(in_dim, ada_dim)
         self.linear1 = nn.Linear(in_dim, mid_dim)
-        self.norm2 = HyperAda(mid_dim, ada_dim)
+        self.norm2 = AdaNorm(mid_dim, ada_dim)
         self.cond_in = HyperAda(mid_dim, cond_dim)
         self.linear_fm = nn.Linear(mid_dim, mid_dim)
         self.dropout = torch.nn.Dropout(dropout)
@@ -50,10 +50,10 @@ class Resnet(nn.Module):
     ) -> torch.FloatTensor:
 
         resid = hidden_states
-        emb = torch.cat([ada_emb, face_embed], dim=-1)
-        hidden_states = self.linear1(self.act(self.norm1(hidden_states, emb)))
-        # if face_embed is not None:
-        #     hidden_states = self.linear_fm(self.act(self.cond_in(hidden_states, face_embed))) # this will corrupt the data so much, because it's not trained
+        # emb = torch.cat([ada_emb, face_embed], dim=-1)
+        hidden_states = self.linear1(self.act(self.norm1(hidden_states, ada_emb)))
+        if face_embed is not None:
+            hidden_states = self.linear_fm(self.act(self.cond_in(hidden_states, face_embed))) # this will corrupt the data so much, because it's not trained
         hidden_states = self.linear_mlp(hidden_states)
         # hidden_states = self.linear2(hidden_states)
       
@@ -324,7 +324,7 @@ class LoraDiffusion(torch.nn.Module):
                       cond_dim=40
                     ):
         super().__init__()
-        cond_dim = model_dim//2
+        # cond_dim = model_dim//2
         self.cond_dropout_prob = cond_dropout_prob
         self.time_embed = TimestepEmbedding(model_dim//2, model_dim//2)
         self.cond_dim = cond_dim
@@ -426,7 +426,7 @@ class LoraDiffusion(torch.nn.Module):
             # face_emb = F.normalize(face_emb, p=2, dim=-1)
 
             # face_emb = torch.cat([full_emb, face_emb], dim=-1)
-            face_emb = self.cond_learn(face_emb)
+            # face_emb = self.cond_learn(face_emb)
             # face_emb = self.cond_norm(face_emb)
             self.conditioning = face_emb
         else:

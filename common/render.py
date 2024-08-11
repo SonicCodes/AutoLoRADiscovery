@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import sys
 import sys
+import random
 import os 
 sys.path.append(os.path.abspath(os.path.join("", "..")))
 sys.path.append("/home/ubuntu/AutoLoRADiscovery/discover_lora_diffusion/weights2weights/")
@@ -43,8 +44,8 @@ def rtn_face_get(self, img, face):
     return face.embedding
 
 ArcFaceONNX.get = rtn_face_get
-app = FaceAnalysis(name="buffalo_sc", providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
-app.prepare(ctx_id=0, det_size=(640, 640))
+app = FaceAnalysis(name="buffalo_l", providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+app.prepare(ctx_id=0, det_size=(320, 320))
 
 def crop_face(img, face_ratio=1.0):
     cv2_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
@@ -135,11 +136,52 @@ def generate_denoising_sequence_viz(list_time_latents, location):
     # save canvas as jpeg with 20 quality
     canvas.save(location, format="JPEG", quality=20)
 
+idens = torch.load("/mnt/rd/identity_df.pt", map_location="cpu")
+def get_label_for_choice(properties):
+    cols = idens.columns.tolist()
+    labels = []
+    for idx in properties:
+        labels.append(cols[idx])
+    return ", ".join(labels)
+
+feature_combinations = [
+    ['Arched_Eyebrows', 'Attractive', 'Big_Lips', 'Narrow_Eyes', 'No_Beard', 'Pointy_Nose', 'Wearing_Lipstick', 'Young'],
+    ['5_o_Clock_Shadow', 'Bags_Under_Eyes', 'Big_Nose', 'Bushy_Eyebrows', 'Male', 'Mouth_Slightly_Open', 'Smiling'],
+    ['Attractive', 'Blond_Hair', 'Heavy_Makeup', 'High_Cheekbones', 'Wearing_Earrings', 'Wearing_Necklace'],
+    ['Bald', 'Chubby', 'Double_Chin', 'Eyeglasses', 'Gray_Hair', 'Male', 'Receding_Hairline'],
+    ['Bangs', 'Black_Hair', 'Heavy_Makeup', 'Oval_Face', 'Pale_Skin', 'Smiling', 'Wearing_Lipstick'],
+    ['Attractive', 'Brown_Hair', 'High_Cheekbones', 'Narrow_Eyes', 'Wavy_Hair', 'Young'],
+    ['Arched_Eyebrows', 'Goatee', 'Male', 'Mustache', 'No_Beard', 'Sideburns', 'Wearing_Necktie'],
+    ['Bags_Under_Eyes', 'Blurry', 'Pale_Skin', 'Pointy_Nose', 'Straight_Hair', 'Wearing_Hat'],
+    ['Attractive', 'Big_Lips', 'Heavy_Makeup', 'High_Cheekbones', 'Rosy_Cheeks', 'Smiling', 'Young'],
+    ['5_o_Clock_Shadow', 'Bushy_Eyebrows', 'Chubby', 'Male', 'Narrow_Eyes', 'No_Beard'],
+    ['Attractive', 'Blond_Hair', 'Oval_Face', 'Smiling', 'Wearing_Earrings', 'Young'],
+    ['Bald', 'Big_Nose', 'Eyeglasses', 'Male', 'No_Beard', 'Pale_Skin'],
+    ['Arched_Eyebrows', 'Brown_Hair', 'Heavy_Makeup', 'High_Cheekbones', 'Pointy_Nose', 'Wearing_Necklace'],
+    ['Bags_Under_Eyes', 'Gray_Hair', 'Male', 'Receding_Hairline', 'Smiling', 'Wearing_Necktie'],
+    ['Attractive', 'Bangs', 'Black_Hair', 'Narrow_Eyes', 'No_Beard', 'Wearing_Lipstick'],
+    ['Chubby', 'Double_Chin', 'Mouth_Slightly_Open', 'Rosy_Cheeks', 'Wavy_Hair'],
+    ['5_o_Clock_Shadow', 'Attractive', 'Goatee', 'High_Cheekbones', 'Male', 'Young'],
+    ['Blurry', 'Eyeglasses', 'Pale_Skin', 'Straight_Hair', 'Wearing_Hat'],
+    ['Big_Lips', 'Bushy_Eyebrows', 'Heavy_Makeup', 'Oval_Face', 'Smiling'],
+    ['Attractive', 'Male', 'No_Beard', 'Pointy_Nose', 'Sideburns', 'Young']
+]
+
+def get_id_for_choice(properties):
+    cols = idens.columns.tolist()
+    ids = []
+    for idx, col in enumerate(cols):
+        if col in properties:
+            ids.append(idx)
+    return np.array(ids)
+
+
 def render_from_lora(lora_diffusion, scheduler, custom_latent=None, custom_title=None, fake_face_embedding=None,lora_vae=None):
     global weight_dimensions
     # global pipe
     latents = custom_latent
     face_emb1 = None
+    caption = "Default from batch"
     if custom_latent is None:
         if fake_face_embedding is None:
             face_emb1 = torch.Tensor(get_face_embedding("/home/ubuntu/AutoLoRADiscovery/junk/1691527680903.jpeg")).unsqueeze(0)
@@ -147,45 +189,45 @@ def render_from_lora(lora_diffusion, scheduler, custom_latent=None, custom_title
             face_emb1 = fake_face_embedding.unsqueeze(0)
 
         
+        face_emb_norm = face_emb1 / face_emb1.norm(dim=-1, keepdim=True)
 
+        properties = torch.ones(40).cuda() - 2
+        # make 4 random properties 1
+        
+        activated_props_ls = random.choice(feature_combinations)
+        activated_props = get_id_for_choice(activated_props_ls)
+        properties[activated_props] = 1
+        properties = properties.unsqueeze(0)
+        caption = ", ".join(activated_props_ls)
+
+        
         # print("Rendering from face embedding, shape:", face_emb1.shape)
-        latents = torch.randn(1, 4096).cuda().to(torch.float16)
+        latents = torch.randn(1, 4096).cuda().to(torch.float16)  * scheduler.init_noise_sigma 
         
         # Create an unconditioned embedding for CFG
-        uncond_face_emb = torch.zeros_like(face_emb1)
+        # uncond_face_emb = torch.zeros_like(face_emb1)
 
-        prev_latents = [latents]
+        # prev_latents = [latents]
+        # latents, _ = lora_diffusion(face_emb1)
         with torch.no_grad():
             for t in scheduler.timesteps:
-                # Concatenate conditional and unconditional embeddings
-                # combined_embeddings = torch.cat([face_emb1, uncond_face_emb], dim=0)
-                
-                # Duplicate latents for conditional and unconditional predictions
-                # latent_model_input = torch.cat([latents] * 2)
-                
-                # Get both conditional and unconditional predictions
+                # latents = scheduler.scale_model_input(latents, t)
                 noise_pred, pred_cond = lora_diffusion(
                     latents, 
-                    t=t.unsqueeze(0).cuda().half(), 
-                    face_embeddings=face_emb1
+                    t.unsqueeze(0).cuda().half(), 
+                    properties
                 )
-                
-                # Separate conditional and unconditional predictions
-                # noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2, dim=0)
-                
-                # Perform classifier-free guidance
-                # cfg_scale = 3.0
-                # noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
-                
-                # Update latents
                 latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
-                prev_latents.append(latents)
+        #         prev_latents.append(latents)
+        # mean, logvar = latents.chunk(2,w  dim=-1) 
+        # latents = mean + torch.randn_like(mean) * torch.exp(0.5 * logvar)
+        # latents = latents #* 0.0152  #* std_w2w
+        # latents = w2w_to_lora(lora_vae, latents)
     else:
         prev_latents = [latents]
-    latents = lora_vae.unstandardized_z(latents[:, :]) #* 2# / 2
-    # latents = latents #* 0.0152  #* std_w2w
-    latents = w2w_to_lora(lora_vae, latents)  
-    # latents = latents * 0.0152
+    latents = lora_vae.unstandardized_z(latents) #* 2# / 2
+    latents = w2w_to_lora(lora_vae,latents)
+    # latents =  lora_vae.deapply_std_on_weights(latents)
 
     if os.path.exists("/mnt/rd/inference_lora"):
         os.system("rm -rf /mnt/rd/inference_lora")
@@ -203,8 +245,11 @@ def render_from_lora(lora_diffusion, scheduler, custom_latent=None, custom_title
     pipe.unet.to("cuda", torch.float16)
 
     
-
-    images = pipe(["A photo of a sks person"] * 4, height=640, width=640, num_inference_steps=50, guidance_scale=3.0).images
+    negative_prompt = "low quality, blurry, unfinished, cartoon"
+    images = pipe(
+        ["sks person with a cat", "sks person with a cat", "sks person with a dog", "sks person"], 
+        negative_prompt=[negative_prompt] * 4,
+                  height=640, width=640, num_inference_steps=50, guidance_scale=2.5).images
     canvas = Image.new('RGB', (640*4, 640))
     fembs = []
     for i, image in enumerate(images):
@@ -254,7 +299,7 @@ def render_from_lora(lora_diffusion, scheduler, custom_latent=None, custom_title
 
 
     return  wandb.Image(temporary_file_path, 
-    caption=custom_title if custom_title is not None else "Generated Image"
+    caption="[ "+(caption)+" ] "+(custom_title if custom_title is not None else "Generated Image")
     ), 0.0, (main_comps, cross_comps)
     # wandb.log({"image":)
 

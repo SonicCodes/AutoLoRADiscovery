@@ -301,7 +301,7 @@ class LoraVAE(torch.nn.Module):
                 if m.bias is not None:
                     torch.nn.init.constant_(m.bias, 0)
 
-    def encode(self, x, kld=False):
+    def encode(self, x, kld=False, mean_logvar=False, actual_noise=None):
         parts = []
         for (_, start, end, _, _), tiny_encoder in zip(config, self.tiny_encoders):
             part = tiny_encoder(x[:, start:end])
@@ -310,9 +310,12 @@ class LoraVAE(torch.nn.Module):
         x_atten, x_atten_w = self.encoder_self_attention(x, x, x, average_attn_weights=False)
         x = x_atten + x
         x = x.flatten(1)
-        
+        if mean_logvar:
+            return self.encoder(x)
         mean,logvar = self.encoder(x).chunk(2, dim=-1)
-        z = mean + torch.randn_like(mean) * torch.exp(0.5 * logvar)
+        if (actual_noise is None):
+            actual_noise = torch.randn_like(mean)
+        z = mean + actual_noise * torch.exp(0.5 * logvar)
         if kld:
             l2_loss = torch.mean(torch.abs(z))
             # kld_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp())
@@ -321,10 +324,10 @@ class LoraVAE(torch.nn.Module):
 
     def standardized_z(self, z):
         # z = (z - latent_mean) / latent_std
-        return z
+        return z #/ 0.8
     def unstandardized_z(self, z):
         # z = z * latent_std + latent_mean
-        return z
+        return z #* 0.8
 
     def decode(self, z):
         x= self.decoder(z)
@@ -341,11 +344,11 @@ class LoraVAE(torch.nn.Module):
         weight_parts = []
         for (key, start, end, length, std) in config:
             weight_parts.append(weights[:, start:end] / std)
-        return torch.cat(weight_parts, dim=-1)
+        return torch.cat(weight_parts, dim=-1) #/ 1.2
     def deapply_std_on_weights(self, weights):
         weight_parts = []
         for (key, start, end, length, std) in config:
-            weight_parts.append(weights[:, start:end] * std)
+            weight_parts.append((weights[:, start:end]) * std)
         return torch.cat(weight_parts, dim=-1)
     def split(self, x):
         parts = []

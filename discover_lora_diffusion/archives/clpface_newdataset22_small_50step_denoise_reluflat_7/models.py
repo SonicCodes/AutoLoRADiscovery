@@ -27,9 +27,9 @@ class Resnet(nn.Module):
         act = torch.nn.SiLU,
     ):
         super().__init__()
-        self.norm1 = HyperAda(in_dim, ada_dim+cond_dim)
+        self.norm1 = AdaNorm(in_dim, ada_dim+cond_dim)
         self.linear1 = nn.Linear(in_dim, mid_dim)
-        self.norm2 = HyperAda(mid_dim, ada_dim)
+        self.norm2 = AdaNorm(mid_dim, ada_dim)
         self.cond_in = HyperAda(mid_dim, cond_dim)
         self.linear_fm = nn.Linear(mid_dim, mid_dim)
         self.dropout = torch.nn.Dropout(dropout)

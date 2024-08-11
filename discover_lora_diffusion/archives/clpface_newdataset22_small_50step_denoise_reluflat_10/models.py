@@ -27,18 +27,13 @@ class Resnet(nn.Module):
         act = torch.nn.SiLU,
     ):
         super().__init__()
-        self.norm1 = HyperAda(in_dim, ada_dim+cond_dim)
+        self.norm1 = AdaNorm(in_dim, ada_dim)
         self.linear1 = nn.Linear(in_dim, mid_dim)
-        self.norm2 = HyperAda(mid_dim, ada_dim)
-        self.cond_in = HyperAda(mid_dim, cond_dim)
+        self.norm2 = AdaNorm(mid_dim, ada_dim)
+        self.cond_in = AdaIN(mid_dim, cond_dim)
         self.linear_fm = nn.Linear(mid_dim, mid_dim)
         self.dropout = torch.nn.Dropout(dropout)
         self.linear2 = nn.Linear(mid_dim, in_dim)
-        self.linear_mlp = nn.Sequential(
-            nn.Linear(mid_dim, mid_dim),
-            nn.SiLU(),
-            nn.Linear(mid_dim, in_dim),
-        )
         self.act = act()
 
 
@@ -50,12 +45,11 @@ class Resnet(nn.Module):
     ) -> torch.FloatTensor:
 
         resid = hidden_states
-        emb = torch.cat([ada_emb, face_embed], dim=-1)
-        hidden_states = self.linear1(self.act(self.norm1(hidden_states, emb)))
-        # if face_embed is not None:
-        #     hidden_states = self.linear_fm(self.act(self.cond_in(hidden_states, face_embed))) # this will corrupt the data so much, because it's not trained
-        hidden_states = self.linear_mlp(hidden_states)
-        # hidden_states = self.linear2(hidden_states)
+
+        hidden_states = self.linear1(self.act(self.norm1(hidden_states, ada_emb)))
+        if face_embed is not None:
+            hidden_states = self.linear_fm(self.act(self.cond_in(hidden_states, face_embed))) # this will corrupt the data so much, because it's not trained
+        hidden_states = self.linear2(self.dropout(self.act(self.norm2(hidden_states, ada_emb))))
       
 
         return hidden_states + resid
@@ -63,15 +57,14 @@ class Resnet(nn.Module):
 
 class ResnetBlock(nn.Module):
 
-    def __init__(self, num_layers=3, in_dim=256, mid_dim=256, ada_dim=512, cond_dim=512, out_dim=None):
+    def __init__(self, num_layers=3, in_dim=256, mid_dim=256, ada_dim=512, cond_dim=512):
         super().__init__()
-        self.layers = nn.ModuleList([Resnet(in_dim, mid_dim, ada_dim=ada_dim, cond_dim=cond_dim, out_dim=out_dim) for _ in range(num_layers)])
-        # self.out_project = nn.Linear(in_dim, out_dim if out_dim is not None else in_dim)
+        self.layers = nn.ModuleList([Resnet(in_dim, mid_dim, ada_dim=ada_dim, cond_dim=cond_dim) for _ in range(num_layers)])
+
     def forward(self, x, ada_emb,  face_embed=None):
         for layer in self.layers:
             x = layer(x, ada_emb,  face_embed)
         return x
-        # return x
 
 
 class AdaIN(nn.Module):
@@ -79,41 +72,21 @@ class AdaIN(nn.Module):
         super().__init__()
         self.norm = nn.InstanceNorm1d(num_features, affine=False)
         self.fc = nn.Linear(num_features, mid_dim * 2)
+        self.combine = nn.Sequential(
+            # nn.SiLU(),
+            nn.Linear(mid_dim, mid_dim),
+        )
 
     def forward(self, _x, ada_emb):
+        # Normalize input
         x = self.norm(_x)
+        # Get scaling and bias parameters from adaptive embedding
         ada_params = self.fc(ada_emb)
         gamma, beta = ada_params.chunk(2, dim=-1)
-        return ((1.0 + gamma) * x + beta)
+        # Reshape for broadcasting
+        # Apply AdaIN
+        return ((1.0 + gamma) * x + beta) #+ _x
 
-class HyperAda(nn.Module):
-    def __init__(self, mid_dim, num_features, rank=16):
-        super().__init__()
-        # self.norm = nn.InstanceNorm1d(num_features, affine=False)
-        self.rank = rank
-        self.generate_weights = nn.Sequential(
-            nn.Linear(num_features, 64),
-            nn.SiLU(),
-            nn.Linear(64, mid_dim * rank * 2)
-        )
-        # self.out_norm = nn.LayerNorm(mid_dim)
-
-    def forward(self, x, ada_emb):
-        x_in = x
-        B, D = x.shape
-        ada_emb = ada_emb.reshape(B, -1)
-        x_weights = self.generate_weights(ada_emb)
-        x_down, x_up = x_weights.view(-1, D, self.rank, 2).chunk(2, dim=-1)
-        x_down, x_up = x_down.squeeze(-1), x_up.squeeze(-1)
-        # print(x_down.shape, x.shape)
-        x = torch.einsum('bc,bco->bo', x, x_down)
-        x = torch.einsum('bc,bco->bo', x, x_up.permute(0, 2, 1))
-        
-        x = x.reshape(B, D)
-
-        # x = self.out_norm(x)
-
-        return x + x_in
 
 # class CrossAttention(nn.Module):
 #     def __init__(self, dim):
@@ -324,7 +297,7 @@ class LoraDiffusion(torch.nn.Module):
                       cond_dim=40
                     ):
         super().__init__()
-        cond_dim = model_dim//2
+        # cond_dim = 128
         self.cond_dropout_prob = cond_dropout_prob
         self.time_embed = TimestepEmbedding(model_dim//2, model_dim//2)
         self.cond_dim = cond_dim
@@ -357,32 +330,30 @@ class LoraDiffusion(torch.nn.Module):
         )
 
         self.in_norm = nn.LayerNorm(data_dim)
-        self.in_proj = nn.Linear(data_dim, model_dim)
-        self.out_proj = nn.Linear(model_dim, data_dim)
-        self.out_norm = nn.LayerNorm(model_dim)
+        # self.in_proj = nn.Linear(data_dim, model_dim)
+        # self.out_proj = nn.Linear(model_dim, data_dim)
+        self.out_norm = nn.LayerNorm(model_dim*2)
 
         # self.out_proj.weight.data = self.in_proj.weight.data.T
 
 
-        self.cond_learn = nn.Sequential(
-            nn.Linear(40, cond_dim),
-            # nn.SiLU(),
-            # nn.Tanh()
-        )
+        # self.cond_learn = nn.Sequential(
+        #     nn.Linear(40, cond_dim),
+        #     nn.SiLU(),
+        #     # nn.Tanh()
+        # )
         # self.cond_norm = nn.LayerNorm(cond_dim)
 
-        # self.cond_out_proj = nn.Sequential(
-        #     nn.LayerNorm(model_dim),
-        #     nn.Linear(model_dim, 40),
-        #     nn.Tanh()
-        # )
+        self.cond_out_proj = nn.Sequential(
+            nn.LayerNorm(model_dim*2),
+            nn.Linear(model_dim*2, 40),
+            nn.Tanh()
+        )
 
         self.conditioning = None
 
         self.downs = nn.ModuleList([ResnetBlock(num_layers=layers_per_block, cond_dim=cond_dim, in_dim=model_dim, mid_dim=int(model_dim * ff_mult), ada_dim=model_dim//2) for _ in range(num_blocks)])
-        self.ups = nn.ModuleList([ResnetBlock(num_layers=layers_per_block, cond_dim=cond_dim,  in_dim=model_dim, out_dim=model_dim, mid_dim=int((model_dim) * ff_mult), ada_dim=model_dim//2) for _ in range(num_blocks)])
-
-        # self.hyper_net_gen = nn.Linear(cond_dim, 2048*32*2)
+        self.ups = nn.ModuleList([ResnetBlock(num_layers=layers_per_block, cond_dim=cond_dim,  in_dim=model_dim*2, mid_dim=int((model_dim) * ff_mult), ada_dim=model_dim//2) for _ in range(num_blocks)])
 
 
     def encode(self, x, kld=False):
@@ -426,7 +397,7 @@ class LoraDiffusion(torch.nn.Module):
             # face_emb = F.normalize(face_emb, p=2, dim=-1)
 
             # face_emb = torch.cat([full_emb, face_emb], dim=-1)
-            face_emb = self.cond_learn(face_emb)
+            # face_emb = self.cond_learn(face_emb)
             # face_emb = self.cond_norm(face_emb)
             self.conditioning = face_emb
         else:
@@ -440,39 +411,35 @@ class LoraDiffusion(torch.nn.Module):
         return embedding
 
 
+
     def forward(self, x, t, face_embeddings=None):
         ada_emb = self.time_embed(t)
         
         self.get_conditioning(face_embeddings)
         # lora_dim = 10_000
         x = self.in_norm(x)
-        x = self.in_proj(x)
-        # x, x_atten_w = self.encode(x)
+        # x = self.in_proj(x)
+        x, x_atten_w = self.encode(x)
         x_skip = x
         skips = []
         for down in (self.downs):
             x = down(x, ada_emb, self.conditioning)
             skips.append(x)
             # raise ValueError("Not implemented, x.shape", x.shape)
-        # x_weights = self.hyper_net_gen(self.conditioning)
-        # x_down, x_up = x_weights.view(-1, 2048, 32, 2).chunk(2, dim=-1)
-        # x_down, x_up = x_down.squeeze(-1), x_up.squeeze(-1)
-     
-        # x = torch.einsum('bi,bij->bj', x, x_down)
-        # x = F.silu(x)
-        # x = torch.einsum('bi,bij->bj', x, x_up.permute(0, 2, 1))
-        for up, skip in zip(self.ups, reversed(skips)):
-            # x = torch.cat([x, skip], dim=-1)
-            x = up(x, ada_emb,  self.conditioning) + skip
 
-        # x = torch.cat([x, x_skip], dim=-1)
-        x = self.out_norm(x) 
+        for up, skip in zip(self.ups, reversed(skips)):
+            x = torch.cat([x, skip], dim=-1)
+            x = up(x, ada_emb,  self.conditioning) #+ skip
+
+
+        
+        x = self.out_norm(torch.cat([x, x_skip], dim=-1)) 
         if face_embeddings is not None:
-            pred_cond = None#self.reconstruct_conditioning(x)
+            pred_cond = self.reconstruct_conditioning(x)
         else:
             pred_cond = None
-        x = self.out_proj(x)
-        # x = self.decode(x)
+        # x = self.out_proj(x)
+        x = self.decode(x)
         
         return x, pred_cond
 

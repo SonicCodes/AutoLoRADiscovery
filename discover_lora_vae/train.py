@@ -266,13 +266,13 @@ def train(args):
             logs = {
                 "mse_loss": mse_loss.detach().item(), 
                 "mse_loss_local": local_losses.detach().item(),
-            "lr": lr_scheduler.get_last_lr()[0],
-            "grad_norm": grad_norm.item(), 
-            "kld": kld.detach().item(),
-            "min_batch": batch.min().item(),
-            "max_batch": batch.max().item(),
-            "pred_min": pred.min().item(),
-            "pred_max": pred.max().item(),
+                "lr": lr_scheduler.get_last_lr()[0],
+                "grad_norm": grad_norm.item(), 
+                "kld": kld.detach().item(),
+                "min_batch": batch.min().item(),
+                "max_batch": batch.max().item(),
+                "pred_min": pred.min().item(),
+                "pred_max": pred.max().item(),
 
             }#, "sp_loss": sp_loss.detach().item(), "kld": kld.detach().item()}
             
